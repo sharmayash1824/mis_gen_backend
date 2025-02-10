@@ -231,9 +231,24 @@ async def extract_kpi_multiple(files: list[UploadFile]):
     for col in date_columns:
         df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")  # Convert & format
 
-    # Save to an Excel file
+    # Save to an Excel file with proper formatting
     excel_path = "extracted_kpis.xlsx"
-    df.to_excel(excel_path, index=False)
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='KPIs')
+        worksheet = writer.sheets['KPIs']
+        
+        # Auto-adjust column widths
+        for column in worksheet.columns:
+            max_length = 0
+            column = list(column)
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = (max_length + 2)
+            worksheet.column_dimensions[column[0].column_letter].width = adjusted_width
 
     return {
         "message": "Extraction successful!",
