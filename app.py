@@ -106,14 +106,17 @@
 # #     uvicorn.run(app, host="0.0.0.0", port=5000, reload=True)
 
 
+
+
+
 import os
 import json
 import google.generativeai as genai
-import pandas as pd
+import PyPDF2
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
-from fastapi.responses import FileResponse
+from collections import defaultdict
 
 # Load Gemini API key
 API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
@@ -125,30 +128,32 @@ genai_model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Define prompt for KPI extraction
 FIXED_PROMPT = """
-Extract the following KPIs from the document and return a clean JSON:
+Extract the following KPIs from the document:
 - PO No.
 - Supplier
 - Material (e.g., SS 304)
 - Material Description
-- PO Rate (USD) (Ensure this is a number)
-- Qty Shipped (MT) (Ensure this is a number)
+- PO Rate (USD)
+- Qty Shipped (MT)
 - FLC No
 - Bank Name
-- Total No. of Containers (Ensure this is a number)
+- Total No. of Containers
 - Load Port
-- Acceptance Amount (Ensure this is a number)
+- Acceptance Amount
 - BL No
-- BL Date (Format as YYYY-MM-DD)
+- BL Date
 - Invoice No
-- Invoice Date (Format as YYYY-MM-DD)
-Ensure the JSON is formatted cleanly with proper data types.
+- Invoice Date
+Return the KPIs in a structured JSON format.
 """
 
 app = FastAPI(
     title="KPI Extraction API",
-    description="Upload multiple PDFs to extract KPIs and download as an Excel file.",
-    version="2.0",
+    description="Upload PDFs to extract KPIs",
+    version="1.0",
     docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 # Enable CORS for frontend integration
@@ -174,96 +179,54 @@ def process_with_gemini(file_path):
         clean_text = response.text.strip("```json").strip("``` ").strip()
 
         try:
-            extracted_data = json.loads(clean_text)
-
-            # Ensure AI response is valid JSON
-            if isinstance(extracted_data, dict):
-                return extracted_data
-            else:
-                return {"error": "Unexpected AI response format", "raw_response": clean_text}
+            return json.loads(clean_text)
         except json.JSONDecodeError:
-            return {"error": "Failed to parse JSON", "raw_response": clean_text}
+            return {
+                "error": "Failed to parse JSON response",
+                "raw_response": clean_text
+            }
     except Exception as e:
         return {"error": f"Error processing with Gemini: {str(e)}"}
 
 
-@app.post("/extract_kpi_multiple/")
-async def extract_kpi_multiple(files: list[UploadFile]):
-    """Handles multiple PDF uploads, extracts KPIs, and saves them in an Excel file."""
-    extracted_data = []
-    expected_fields = [
-        "PO No.", "Supplier", "Material", "Material Description", "PO Rate (USD)", "Qty Shipped (MT)",
-        "FLC No", "Bank Name", "Total No. of Containers", "Load Port", "Acceptance Amount",
-        "BL No", "BL Date", "Invoice No", "Invoice Date"
-    ]
+def merge_kpi_results(kpi_results):
+    """Merges multiple KPI extraction results into a single dictionary (union)."""
+    merged_kpis = defaultdict(set)
 
-    for file in files:
-        file_path = f"temp_{file.filename}"
+    for result in kpi_results:
+        for key, value in result.items():
+            merged_kpis[key].add(value)
 
-        # Save file temporarily
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # Process file with Gemini AI
-        extracted_info = process_with_gemini(file_path)
-        extracted_info["File Name"] = file.filename  # Add filename to data
-
-        # Ensure all expected fields exist (fill missing with "N/A")
-        for field in expected_fields:
-            extracted_info.setdefault(field, "N/A")
-
-        extracted_data.append(extracted_info)
-        os.remove(file_path)  # Cleanup file after processing
-
-    # Convert extracted data into a Pandas DataFrame
-    if extracted_data:
-        df = pd.DataFrame(extracted_data)
-    else:
-        df = pd.DataFrame(columns=["File Name"] + expected_fields)  # Create an empty file if no data
-
-    # Convert numeric fields properly
-    numeric_columns = ["PO Rate (USD)", "Qty Shipped (MT)", "Total No. of Containers", "Acceptance Amount"]
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")  # Convert, but keep NaN if invalid
-
-    # Format dates properly
-    date_columns = ["BL Date", "Invoice Date"]
-    for col in date_columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")  # Convert & format
-
-    # Save to an Excel file with proper formatting
-    excel_path = "extracted_kpis.xlsx"
-    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='KPIs')
-        worksheet = writer.sheets['KPIs']
-        
-        # Auto-adjust column widths
-        for column in worksheet.columns:
-            max_length = 0
-            column = list(column)
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = (max_length + 2)
-            worksheet.column_dimensions[column[0].column_letter].width = adjusted_width
-
-    return {
-        "message": "Extraction successful!",
-        "excel_url": "/download_excel/"
-    }
+    return {key: ", ".join(map(str, values)) for key, values in merged_kpis.items()}
 
 
-@app.get("/download_excel/")
-async def download_excel():
-    """Provides a downloadable link for the extracted KPI data in an Excel file."""
-    excel_path = "extracted_kpis.xlsx"
-    if os.path.exists(excel_path):
-        return FileResponse(
-            excel_path,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename="extracted_kpis.xlsx"
-        )
-    return {"error": "Excel file not found"}
+@app.post("/extract_kpi/")
+async def extract_kpi(files: list[UploadFile] = File(...)):
+    """Handles multiple PDF uploads and extracts KPIs from all files."""
+    kpi_results = []
+
+    try:
+        for file in files:
+            file_path = f"temp_{file.filename}"
+
+            # Save file temporarily
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+            # Process extracted text with Gemini
+            kpi_result = process_with_gemini(file_path)
+
+            if "error" not in kpi_result:
+                kpi_results.append(kpi_result)
+
+            # Cleanup temp file
+            os.remove(file_path)
+
+        if not kpi_results:
+            return {"error": "No valid KPI data extracted."}
+
+        merged_result = merge_kpi_results(kpi_results)
+        return merged_result
+
+    except Exception as e:
+        return {"error": f"File processing error: {str(e)}"}
