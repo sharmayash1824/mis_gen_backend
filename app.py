@@ -1,8 +1,9 @@
+
 import os
 import json
 import google.generativeai as genai
 import PyPDF2
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 
@@ -16,7 +17,7 @@ genai_model = genai.GenerativeModel("gemini-1.5-flash")
 
 # Define prompt for KPI extraction
 FIXED_PROMPT = """
-Extract the following KPIs from the document:
+Extract the following KPIs from these multiple documents and combine the information:
 - PO No.
 - Supplier
 - Material (e.g., SS 304)
@@ -33,19 +34,18 @@ Extract the following KPIs from the document:
 - BL Date
 - Invoice No
 - Invoice Date
-Return the KPIs in a structured JSON format.
+Analyze all documents together and return a single comprehensive JSON output combining information from all documents.
 """
 
 app = FastAPI(
     title="KPI Extraction API",
-    description="Upload a PDF to extract KPIs",
+    description="Upload multiple PDFs to extract combined KPIs",
     version="1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
 
-# Enable CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,18 +54,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.get("/")
 def read_root():
     return {"message": "KPI Extraction API is running!"}
 
-
-
-def process_with_gemini(file_path):
-    """Processes extracted text using Gemini AI with a fixed prompt."""
-    uploaded_file = genai.upload_file(file_path)
+def process_with_gemini(file_paths):
+    """Processes multiple files using Gemini AI with a fixed prompt."""
     try:
-        response = genai_model.generate_content([FIXED_PROMPT, uploaded_file])
+        uploaded_files = [genai.upload_file(path) for path in file_paths]
+        response = genai_model.generate_content([FIXED_PROMPT] + uploaded_files)
         clean_text = response.text.strip("```json").strip("``` ").strip()
 
         try:
@@ -78,30 +75,31 @@ def process_with_gemini(file_path):
     except Exception as e:
         return {"error": f"Error processing with Gemini: {str(e)}"}
 
-
 @app.post("/extract_kpi/")
-async def extract_kpi(file: UploadFile):
-    """Handles PDF file upload and extracts KPIs."""
+async def extract_kpi(files: list[UploadFile] = File(...)):
+    """Handles multiple PDF file uploads and extracts combined KPIs."""
     try:
-        file_path = f"temp_{file.filename}"
+        temp_files = []
+        
+        # Save all files temporarily
+        for file in files:
+            file_path = f"temp_{file.filename}"
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            temp_files.append(file_path)
 
-        # Save file temporarily
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Process all files together
+        result = process_with_gemini(temp_files)
 
-        # Extract text from PDF
-        # extracted_text = extract_text_from_pdf(file_path)
-        # os.remove(file_path)  # Cleanup temp file
+        # Clean up temporary files
+        for file_path in temp_files:
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
-        # if "Error" in extracted_text:
-        #     return {"error": extracted_text}
-
-        # Process extracted text with Gemini
-        return process_with_gemini(file_path)
+        return result
     except Exception as e:
+        # Clean up in case of error
+        for file_path in temp_files:
+            if os.path.exists(file_path):
+                os.remove(file_path)
         return {"error": f"File processing error: {str(e)}"}
-
-# # Run the API
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=5000, reload=True)
