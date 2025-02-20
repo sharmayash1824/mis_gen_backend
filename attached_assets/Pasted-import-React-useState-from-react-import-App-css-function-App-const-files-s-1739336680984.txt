@@ -1,0 +1,221 @@
+import React, { useState } from "react";
+import "./App.css";
+
+function App() {
+  const [files, setFiles] = useState([]);
+  const [fileNames, setFileNames] = useState([]);
+  const [result, setResult] = useState(null);
+  const [editedResult, setEditedResult] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [downloadUrl, setDownloadUrl] = useState("");
+  const [isEditing, setIsEditing] = useState(false);
+
+  const API_BASE_URL = "https://9dcf7332-d21f-40ad-90a5-2fc4e7eb3cf6-00-riq23xxw8xaw.sisko.replit.dev";
+
+  const handleFileChange = (event) => {
+    const uploadedFiles = Array.from(event.target.files);
+    const validFiles = uploadedFiles.filter(file => file.type === "application/pdf");
+
+    if (validFiles.length !== uploadedFiles.length) {
+      alert("Please upload valid PDF files only.");
+    }
+
+    if (validFiles.length > 0) {
+      setFiles([...files, ...validFiles]);
+      setFileNames([...fileNames, ...validFiles.map(file => file.name)]);
+      setErrorMessage("");
+    }
+  };
+
+  const removeFile = (index) => {
+    const newFiles = files.filter((_, i) => i !== index);
+    const newFileNames = fileNames.filter((_, i) => i !== index);
+    setFiles(newFiles);
+    setFileNames(newFileNames);
+  };
+
+  const handleExtract = async () => {
+    if (files.length === 0) {
+      alert("Please upload at least one file.");
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage("");
+    setResult(null);
+    setDownloadUrl("");
+
+    const formData = new FormData();
+    files.forEach((file) => {
+      formData.append(`files`, file);
+    });
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/extract_kpi/`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (data.download_url) {
+        setDownloadUrl(`${API_BASE_URL}${data.download_url}`);
+      } else if (data.error) {
+        setErrorMessage(data.error);
+      } else {
+        setResult(data);
+        setEditedResult(data);
+      }
+    } catch (error) {
+      setErrorMessage(`Failed to extract KPIs: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveCSV = () => {
+    const csvContent = `data:text/csv;charset=utf-8,${Object.entries(editedResult)
+      .map(([key, value]) => `${key},${value}`)
+      .join("\n")}`;
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", "extracted_kpis.csv");
+    document.body.appendChild(link);
+
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleUpdateBackendCSV = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/update_csv/`, {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(editedResult)
+      });
+
+      if (response.ok) {
+        alert("CSV file updated successfully!");
+      } else {
+        alert("Failed to update CSV file.");
+      }
+    } catch (error) {
+      alert(`Error updating CSV file: ${error.message}`);
+    }
+  };
+
+  const handleEditChange = (field, value) => {
+    setEditedResult((prev) => ({
+      ...prev,
+      [field]: value,
+    }));
+  };
+
+  return (
+    <div className="container">
+      <h1>KPI Extraction Tool</h1>
+      <div className="input-section">
+        <label htmlFor="file-upload" className="upload-label">
+          Choose PDF Files
+        </label>
+        <input
+          id="file-upload"
+          type="file"
+          accept=".pdf"
+          multiple
+          onChange={handleFileChange}
+        />
+        <div className="file-names">
+          {fileNames.length > 0 ? (
+            fileNames.map((name, index) => (
+              <div key={index} className="file-item">
+                <p className="file-name">{name}</p>
+                <button
+                  className="remove-file"
+                  onClick={() => removeFile(index)}
+                  aria-label="Remove file"
+                >
+                  ×
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="file-name">No files chosen</p>
+          )}
+        </div>
+        {fileNames.length > 0 && (
+          <button
+            className="clear-all-btn"
+            onClick={() => {
+              setFiles([]);
+              setFileNames([]);
+            }}
+          >
+            Clear All
+          </button>
+        )}
+      </div>
+
+      <button onClick={handleExtract} disabled={loading}>
+        {loading ? "Processing..." : "Extract KPIs"}
+      </button>
+
+      {errorMessage && <p className="error">{errorMessage}</p>}
+
+      {result && (
+        <div className="result-section">
+          <h3>Extracted KPIs:</h3>
+          <button onClick={() => setIsEditing(!isEditing)}>
+            {isEditing ? "Save Changes" : "Edit"}
+          </button>
+          <table>
+            <thead>
+              <tr>
+                <th>Field</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {["PO No.", "Supplier", "Material", "Material Description", "PO Rate (USD)", "Net Weight", "Gross Weight",
+                "LC No", "Bank Name", "Total No. of Containers", "Load Port", "Acceptance Amount", "BL No", "BL Date", 
+                "Invoice No", "Invoice Date"].map((field) => (
+                <tr key={field}>
+                  <td>{field}</td>
+                  <td>
+                    {isEditing ? (
+                      <input
+                        type="text"
+                        value={editedResult[field] || ""}
+                        onChange={(e) => handleEditChange(field, e.target.value)}
+                      />
+                    ) : (
+                      editedResult[field] || "-"
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button onClick={handleSaveCSV}>Download MIS</button>
+          <button onClick={handleUpdateBackendCSV}>Update Backend CSV</button>
+        </div>
+      )}
+
+      {downloadUrl && (
+        <div className="download-section">
+          <h3>Download Extracted Data</h3>
+          <a href={downloadUrl} download>
+            <button>Download Excel</button>
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
